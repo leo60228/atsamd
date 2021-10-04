@@ -1,5 +1,5 @@
-<!-- SAMD11 and SAMD21 are similar enough to be covered by this, but SAMX5X is very different. -->
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SAMD11 and SAMD21 are similar enough to be covered by this, but SAMX5X is very different. -->
 <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
   <!-- Add PTCReserved to the Generic Clock Selection ID enum on the GCLK peripheral -->
   <xsl:template name="PTC_GCLK_ID">
