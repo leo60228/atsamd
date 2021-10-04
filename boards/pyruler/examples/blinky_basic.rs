@@ -22,7 +22,7 @@ fn main() -> ! {
         &mut peripherals.NVMCTRL,
     );
     let mut pins = bsp::Pins::new(peripherals.PORT);
-    let mut red_led = pins.d13.into_open_drain_output(&mut pins.port);
+    let mut red_led = pins.led4.into_open_drain_output(&mut pins.port);
     let mut delay = Delay::new(core.SYST, &mut clocks);
     loop {
         delay.delay_ms(200u8);

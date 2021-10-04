@@ -56,13 +56,10 @@ define_pins!(
     pin dotstar_di = a0,
     /// Not connected, but usable as the MISO when addressing
     /// the dotstar over SPI.
-    pin dotstar_nc = a14,
+    pin dotstar_nc = a16,
 
     pin swdio = a31,
     pin swdclk = a30,
-
-    /// USB host enable pin
-    pin usb_host_enable = a28,
 
     /// The USB SOF 1kHz pad
     pin usb_sof = a23,
@@ -70,6 +67,16 @@ define_pins!(
     pin usb_dm = a24,
     /// The USB D+ pad
     pin usb_dp = a25,
+
+    pin cap0 = a11,
+    pin cap1 = a5,
+    pin cap2 = a4,
+    pin cap3 = a3,
+
+    pin led4 = a15,
+    pin led5 = a14,
+    pin led6 = a28,
+    pin led7 = a27,
 );
 
 impl Pins {
@@ -130,7 +137,7 @@ pub struct Dotstar {
     pub di: gpio::Pa0<Input<Floating>>,
     // Pa14 is NC on the Trinket M0, so its safe to use
     // as the MISO given the HAL requires it.
-    pub nc: gpio::Pa14<Input<Floating>>,
+    pub nc: gpio::Pa16<Input<Floating>>,
 }
 
 impl Dotstar {
@@ -141,7 +148,7 @@ impl Dotstar {
         port: &mut Port,
     ) -> apa102_spi::Apa102<
         bitbang_hal::spi::SPI<
-            gpio::Pa14<Input<PullUp>>,
+            gpio::Pa16<Input<PullUp>>,
             gpio::Pa0<Output<PushPull>>,
             gpio::Pa1<Output<PushPull>>,
             T,
