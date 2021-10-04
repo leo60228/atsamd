@@ -24,6 +24,7 @@ optional = true
 [dependencies.atsamd-hal]
 version = "0.13"
 default-features = false
+path = "../../hal"
 
 [dependencies.usb-device]
 version = "0.2"
@@ -38,7 +39,7 @@ panic-halt = "0.2"
 
 [features]
 # ask the HAL to enable atsamd21e support
-default = ["rt", "atsamd-hal/samd21e"]
+default = ["rt", "atsamd-hal/samd21e", "unproven", "usb"]
 rt = ["cortex-m-rt", "atsamd-hal/samd21e-rt"]
 unproven = ["atsamd-hal/unproven"]
 usb = ["atsamd-hal/usb", "usb-device", "usbd-serial"]

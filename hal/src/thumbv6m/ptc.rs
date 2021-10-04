@@ -58,10 +58,14 @@ impl Ptc<PTC> {
         // ----------
         //   11100000
         // So honestly, I'm just going to set them to 0 in one step.
-        ptc.freqctrl.write(|w| {
-            w.freqspreaden().clear_bit();
-            w.sampledelay().variant(SAMPLEDELAY_A::FREQHOP1)
-        });
+        ptc.freqctrl
+            .modify(|r, w| unsafe { w.bits(r.bits() & 0x9F) });
+        while ptc.ctrlb.read().syncflag().bit_is_set() {}
+        ptc.freqctrl
+            .modify(|r, w| unsafe { w.bits(r.bits() & 0xEF) });
+        while ptc.ctrlb.read().syncflag().bit_is_set() {}
+        ptc.freqctrl
+            .modify(|_, w| w.sampledelay().variant(SAMPLEDELAY_A::FREQHOP1));
         while ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         // Software init
@@ -142,6 +146,9 @@ impl Ptc<PTC> {
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         self.ptc.convctrl.write(|w| w.convert().set_bit());
+        while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
+
+        //while self.ptc.convctrl.read().convert().bit_is_set() {}
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         self.ptc.result.read().result().bits()
