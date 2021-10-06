@@ -17,6 +17,7 @@ use crate::target_device::{
     },
     PM, PTC,
 };
+use crate::thumbv6m::clock::{ClockGenId, ClockSource};
 
 pub struct Ptc<PTC> {
     ptc: PTC,
@@ -24,24 +25,30 @@ pub struct Ptc<PTC> {
 
 impl Ptc<PTC> {
     pub fn ptc(ptc: PTC, pm: &mut PM, clocks: &mut GenericClockController) -> Self {
+        // Enable the PTC clock
+        let gclk3 = clocks
+            .configure_gclk_divider_and_source(ClockGenId::GCLK3, 1, ClockSource::OSC8M, false)
+            .expect("gclk3 already in use");
+        clocks.ptc(&gclk3).expect("ptc clock setup failed");
+
         // Enable PTC in the APBC mask
         pm.apbcmask.modify(|_, w| w.ptc_().set_bit());
-        let gclk1 = clocks.gclk1();
-        // Enable the PTC clock
-        clocks.ptc(&gclk1).expect("ptc clock setup failed");
-        while ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         // Reset the PTC module
-        ptc.ctrla.modify(|_, w| w.swrst().set_bit());
+        while ptc.ctrlb.read().syncflag().bit_is_set() {}
+        ptc.ctrla.modify(|_, w| w.enable().clear_bit());
         while ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         // Magic writes? Honestly dunno what these are for.
         // f7 => 11110111
         // fb => 11111011
         // fc => 11111100
-        ptc.unk4c04.write(|w| unsafe { w.bits(0xf7) });
-        ptc.unk4c04.write(|w| unsafe { w.bits(0xfb) });
-        ptc.unk4c04.write(|w| unsafe { w.bits(0xfc) });
+        ptc.unk4c04
+            .modify(|r, w| unsafe { w.bits(r.bits() & 0xF7) });
+        ptc.unk4c04
+            .modify(|r, w| unsafe { w.bits(r.bits() & 0xFB) });
+        ptc.unk4c04
+            .modify(|r, w| unsafe { w.bits(r.bits() & 0xFC) });
         while ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         // Next in the init sequence in the FreeTouch repo, writes of the following two
@@ -59,14 +66,7 @@ impl Ptc<PTC> {
         //   11100000
         // So honestly, I'm just going to set them to 0 in one step.
         ptc.freqctrl
-            .modify(|r, w| unsafe { w.bits(r.bits() & 0x9F) });
-        while ptc.ctrlb.read().syncflag().bit_is_set() {}
-        ptc.freqctrl
-            .modify(|r, w| unsafe { w.bits(r.bits() & 0xEF) });
-        while ptc.ctrlb.read().syncflag().bit_is_set() {}
-        ptc.freqctrl
-            .modify(|_, w| w.sampledelay().variant(SAMPLEDELAY_A::FREQHOP1));
-        while ptc.ctrlb.read().syncflag().bit_is_set() {}
+            .write(|w| w.freqspreaden().clear_bit().sampledelay().freqhop1());
 
         // Software init
         ptc.ctrlc.write(|w| w.init().set_bit());
@@ -75,13 +75,19 @@ impl Ptc<PTC> {
         while ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         // Set interrupt enables
-        ptc.intenclr.write(|w| {
-            w.wco().set_bit();
-            w.eoc().set_bit()
-        });
+        ptc.intenclr.modify(|_, w| w.wco().set_bit());
+        while ptc.ctrlb.read().syncflag().bit() {}
+        ptc.intenclr.modify(|_, w| w.eoc().set_bit());
+        while ptc.ctrlb.read().syncflag().bit() {}
+
+        ptc.yselecten.write(|w| unsafe { w.bits(0xFFFF) });
         while ptc.ctrlb.read().syncflag().bit_is_set() {}
 
-        Self { ptc }
+        let mut this = Self { ptc };
+
+        this.power_up();
+
+        this
     }
 
     pub fn compcap(&mut self, compcap: u16) {
@@ -99,18 +105,18 @@ impl Ptc<PTC> {
     pub fn oversample(&mut self, oversample: ADCACCUM_A) {
         self.ptc
             .convctrl
-            .write(|w| w.adcaccum().variant(oversample));
+            .modify(|_, w| w.adcaccum().variant(oversample));
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
     }
 
     pub fn sample_delay(&mut self, sampledelay: SAMPLEDELAY_A) {
-        match sampledelay {
-            SAMPLEDELAY_A::FREQHOP1 => self.ptc.freqctrl.write(|w| w.freqspreaden().clear_bit()),
-            _ => self.ptc.freqctrl.write(|w| w.freqspreaden().set_bit()),
-        }
-        self.ptc
-            .freqctrl
-            .write(|w| w.sampledelay().variant(sampledelay));
+        let freqspreaden = sampledelay != SAMPLEDELAY_A::FREQHOP1;
+        self.ptc.freqctrl.write(|w| {
+            w.freqspreaden()
+                .bit(freqspreaden)
+                .sampledelay()
+                .variant(sampledelay)
+        });
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
     }
 
@@ -121,21 +127,17 @@ impl Ptc<PTC> {
 
     pub fn xselect(&mut self, xselect: XMUX_A) {
         self.ptc.xselect.write(|w| w.xmux().variant(xselect));
+        while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
     }
 
     pub fn yselect(&mut self, yselect: YMUX_A) {
         self.ptc.yselect.write(|w| w.ymux().variant(yselect));
+        while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
     }
 
     fn power_up(&mut self) {
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
         self.ptc.ctrla.modify(|_, w| w.enable().set_bit());
-        while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
-    }
-
-    fn power_down(&mut self) {
-        while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
-        self.ptc.ctrla.modify(|_, w| w.enable().clear_bit());
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
     }
 
@@ -148,7 +150,7 @@ impl Ptc<PTC> {
         self.ptc.convctrl.write(|w| w.convert().set_bit());
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
 
-        //while self.ptc.convctrl.read().convert().bit_is_set() {}
+        while self.ptc.convctrl.read().convert().bit_is_set() {}
         while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
 
         self.ptc.result.read().result().bits()
@@ -172,20 +174,14 @@ where
             self.ptc
                 .xselect
                 .write(|w| unsafe { w.xmux().bits(1 << channel) });
-            self.ptc
-                .xselecten
-                .modify(|r, w| unsafe { w.bits(r.bits() | (1 << channel)) });
         } else {
             self.ptc
                 .yselect
                 .write(|w| unsafe { w.ymux().bits(1 << channel) });
-            self.ptc
-                .yselecten
-                .modify(|r, w| unsafe { w.bits(r.bits() | (1 << channel)) });
         };
-        self.power_up();
+        while self.ptc.ctrlb.read().syncflag().bit_is_set() {}
+
         let result = self.convert();
-        self.power_down();
 
         Ok(result.into())
     }
