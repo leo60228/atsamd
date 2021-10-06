@@ -2,153 +2,130 @@
 #![no_main]
 
 use bsp::hal;
-use panic_halt as _;
+use panic_probe as _;
 use pyruler as bsp;
+use rtt_target::{rprintln, rtt_init_print};
 
 use bsp::entry;
-use core::cell::RefCell;
-use core::fmt::Write;
-use core::sync::atomic::{AtomicU16, Ordering};
-use cortex_m::interrupt::Mutex;
-use cortex_m::peripheral::NVIC;
 use hal::clock::GenericClockController;
-use hal::delay::Delay;
 use hal::gpio::v2::{Pin, B};
-use hal::pac::{
-    interrupt,
-    ptc::{convctrl::*, freqctrl::*, serres::*, yselect::*},
-    CorePeripherals, Peripherals,
-};
+use hal::pac::{Peripherals, PTC};
 use hal::prelude::*;
-use hal::thumbv6m::ptc::Ptc;
-use hal::usb::UsbBus;
-use usb_device::bus::UsbBusAllocator;
-use usb_device::prelude::*;
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
+use hal::thumbv6m::clock::{ClockGenId, ClockSource};
 
-struct NumberBuf {
-    data: [u8; 16],
-    len: usize,
+fn measure(ptc: &PTC) -> u16 {
+    rprintln!("selecting");
+    ptc.yselect.write(|w| w.ymux().y3());
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("setting resistor");
+    ptc.serres.write(|w| w.resistor().res50k());
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("setting oversampling");
+    ptc.convctrl.modify(|_, w| w.adcaccum().oversample4());
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("setting freqctrl");
+    ptc.freqctrl
+        .modify(|_, w| w.freqspreaden().clear_bit().sampledelay().freqhop1());
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("setting capacitors");
+    ptc.compcap.write(|w| unsafe { w.value().bits(0x3000) });
+    while ptc.ctrlb.read().syncflag().bit() {}
+    ptc.intcap.write(|w| unsafe { w.value().bits(0x3F) });
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("setting burstmode");
+    ptc.burstmode.write(|w| unsafe { w.bits(0xA4) });
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("starting conversion");
+    ptc.convctrl.modify(|_, w| w.convert().set_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("started");
+    while ptc.convctrl.read().convert().bit() {}
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("done");
+
+    let conversion = ptc.result.read().result().bits();
+
+    conversion / 4
 }
-
-impl NumberBuf {
-    pub fn new() -> Self {
-        Self {
-            data: [0; 16],
-            len: 0,
-        }
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.data[..self.len]
-    }
-}
-
-impl Write for NumberBuf {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let b = s.as_bytes();
-        let new_len = self.len + b.len();
-
-        if new_len > 16 {
-            return Err(core::fmt::Error);
-        }
-
-        let target = &mut self.data[self.len..][..b.len()];
-        target.copy_from_slice(b);
-
-        self.len = new_len;
-
-        Ok(())
-    }
-}
-
-static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
-static USB_BUS: Mutex<RefCell<Option<UsbDevice<UsbBus>>>> = Mutex::new(RefCell::new(None));
-static USB_SERIAL: Mutex<RefCell<Option<SerialPort<UsbBus>>>> = Mutex::new(RefCell::new(None));
-static READING: AtomicU16 = AtomicU16::new(0xbbbb);
 
 #[entry]
 fn main() -> ! {
+    rtt_init_print!();
+
+    rprintln!("initializing clocks");
+
     let mut peripherals = Peripherals::take().unwrap();
-    let mut core = CorePeripherals::take().unwrap();
     let mut clocks = GenericClockController::with_internal_32kosc(
         peripherals.GCLK,
         &mut peripherals.PM,
         &mut peripherals.SYSCTRL,
         &mut peripherals.NVMCTRL,
     );
+
+    rprintln!("configuring gclk3");
+    let gclk3 = clocks
+        .configure_gclk_divider_and_source(ClockGenId::GCLK3, 1, ClockSource::OSC8M, false)
+        .unwrap();
+    rprintln!("configuring ptc clock");
+    clocks.ptc(&gclk3).unwrap();
+
+    rprintln!("enabling ptc power");
+    peripherals.PM.apbcmask.modify(|_, w| w.ptc_().set_bit());
+
     let pins = bsp::Pins::new(peripherals.PORT);
-    let mut delay = Delay::new(core.SYST, &mut clocks);
-    let mut red_led = Pin::from(pins.led5).into_push_pull_output();
-    let mut micro_button = Pin::from(pins.cap1).into_alternate::<B>();
 
-    READING.store(0xdddd, Ordering::SeqCst);
+    let mut yellow_led = Pin::from(pins.led5).into_push_pull_output();
 
-    let mut ptc = Ptc::ptc(peripherals.PTC, &mut peripherals.PM, &mut clocks);
+    let _cap1 = Pin::from(pins.cap1).into_alternate::<B>();
 
-    ptc.oversample(ADCACCUM_A::OVERSAMPLE4);
-    ptc.series_resistance(RESISTOR_A::RES0);
-    ptc.compcap(0x2000);
-    ptc.intcap(0x3F);
-    ptc.sample_delay(SAMPLEDELAY_A::FREQHOP1);
+    let ptc = peripherals.PTC;
 
-    let bus_allocator = bsp::usb_allocator(
-        peripherals.USB,
-        &mut clocks,
-        &mut peripherals.PM,
-        pins.usb_dm,
-        pins.usb_dp,
-    );
-    let bus_allocator: &'static UsbBusAllocator<UsbBus> =
-        unsafe { USB_ALLOCATOR.insert(bus_allocator) };
-    let usb_serial = SerialPort::new(bus_allocator);
-    let usb_bus = UsbDeviceBuilder::new(bus_allocator, UsbVidPid(0x16c0, 0x27dd))
-        .manufacturer("Fake company")
-        .product("Serial port")
-        .serial_number("TEST")
-        .device_class(USB_CLASS_CDC)
-        .build();
+    rprintln!("disabling ptc");
+    while ptc.ctrlb.read().syncflag().bit() {}
+    ptc.ctrla.modify(|_, w| w.enable().clear_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
 
-    cortex_m::interrupt::free(move |cs| {
-        *USB_BUS.borrow(cs).borrow_mut() = Some(usb_bus);
-        *USB_SERIAL.borrow(cs).borrow_mut() = Some(usb_serial);
-    });
+    rprintln!("initializing ptc");
+    ptc.unk4c04
+        .modify(|r, w| unsafe { w.bits(r.bits() & 0xF7) });
+    ptc.unk4c04
+        .modify(|r, w| unsafe { w.bits(r.bits() & 0xFB) });
+    ptc.unk4c04
+        .modify(|r, w| unsafe { w.bits(r.bits() & 0xFC) });
+    while ptc.ctrlb.read().syncflag().bit() {}
+    ptc.freqctrl
+        .write(|w| w.freqspreaden().clear_bit().sampledelay().freqhop1());
+    ptc.ctrlc.modify(|_, w| w.init().set_bit());
+    ptc.ctrla.modify(|_, w| w.runstdby().set_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
+    ptc.intenclr.modify(|_, w| w.wco().set_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
+    ptc.intenclr.modify(|_, w| w.eoc().set_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
 
-    unsafe {
-        core.NVIC.set_priority(interrupt::USB, 1);
-        NVIC::unmask(interrupt::USB);
-    }
+    ptc.yselecten.write(|w| w.y3en().set_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
 
-    let initial_value: u16 = ptc.read(&mut micro_button).unwrap_or(0xaaaa);
-    let threshold = initial_value + 100;
+    rprintln!("enabling ptc");
+    ptc.ctrla.modify(|_, w| w.enable().set_bit());
+    while ptc.ctrlb.read().syncflag().bit() {}
+
+    rprintln!("measuring");
+    let threshold = measure(&ptc) + 200;
 
     loop {
-        let value: u16 = ptc.read(&mut micro_button).unwrap_or(0xaaaa);
-        if value > threshold {
-            red_led.set_high().unwrap();
+        if measure(&ptc) > threshold {
+            yellow_led.set_high().unwrap();
         } else {
-            red_led.set_low().unwrap();
-        }
-
-        READING.store(if value == 0 { 0xcccc } else { value }, Ordering::SeqCst);
-
-        delay.delay_ms(60u8);
-    }
-}
-
-#[interrupt]
-fn USB() {
-    let cs = unsafe { cortex_m::interrupt::CriticalSection::new() };
-    let mut serial_ref = USB_SERIAL.borrow(&cs).borrow_mut();
-    let mut bus_ref = USB_BUS.borrow(&cs).borrow_mut();
-    if let (Some(usb_serial), Some(usb_bus)) = (serial_ref.as_mut(), bus_ref.as_mut()) {
-        usb_bus.poll(&mut [usb_serial]);
-        let mut buf = [0u8; 64];
-
-        if let Ok(_count) = usb_serial.read(&mut buf) {
-            let mut num = NumberBuf::new();
-            let _ = num.write_fmt(format_args!("{}\n", READING.load(Ordering::SeqCst)));
-            usb_serial.write(num.as_bytes()).unwrap();
+            yellow_led.set_low().unwrap();
         }
     }
 }
